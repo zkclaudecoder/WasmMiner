@@ -1,10 +1,14 @@
-use std::io::{BufRead, BufReader, Write};
+mod miner;
+mod stratum_io;
+
+use std::io::{BufRead, BufReader};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
-use sha2::{Digest, Sha256};
+use miner::{mine_job, MineJobParams};
+use stratum_io::{read_json, send_line};
+use wasmminer_core::stratum_utils::parse_target;
 
 const DEFAULT_TARGET: &str =
     "2000000000000000000000000000000000000000000000000000000000000000";
@@ -18,6 +22,8 @@ fn main() -> anyhow::Result<()> {
     }
     let pool_addr = &args[1];
     let worker_name = &args[2];
+
+    #[cfg(feature = "native")]
     let num_threads: u64 = args
         .get(3)
         .and_then(|s| s.parse().ok())
@@ -26,6 +32,9 @@ fn main() -> anyhow::Result<()> {
                 .map(|n| n.get() as u64)
                 .unwrap_or(4)
         });
+
+    #[cfg(not(feature = "native"))]
+    let num_threads: u64 = 1;
 
     eprintln!("=== Zcash CPU Miner (equihash 200,9) ===");
     eprintln!("Pool:    {}", pool_addr);
@@ -37,8 +46,28 @@ fn main() -> anyhow::Result<()> {
     let stream = TcpStream::connect(pool_addr)?;
     eprintln!("Connected!");
 
-    let writer = Arc::new(Mutex::new(stream.try_clone()?));
-    let mut reader = BufReader::new(stream);
+    // Native: clone the stream so reader and writer are independent.
+    // WASM: try_clone() isn't supported in WASI, so share via Arc<Mutex>
+    // with a wrapper that locks the mutex to read.
+    #[cfg(feature = "native")]
+    let (writer, mut reader) = {
+        let writer = Arc::new(Mutex::new(stream.try_clone()?));
+        let reader = BufReader::new(stream);
+        (writer, Box::new(reader) as Box<dyn BufRead>)
+    };
+
+    #[cfg(not(feature = "native"))]
+    let (writer, mut reader) = {
+        let writer = Arc::new(Mutex::new(stream));
+        struct MutexReader(Arc<Mutex<TcpStream>>);
+        impl std::io::Read for MutexReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().read(buf)
+            }
+        }
+        let reader = BufReader::new(MutexReader(writer.clone()));
+        (writer, Box::new(reader) as Box<dyn BufRead>)
+    };
 
     // --- Subscribe ---
     send_line(
@@ -46,7 +75,7 @@ fn main() -> anyhow::Result<()> {
         &serde_json::json!({
             "id": 1,
             "method": "mining.subscribe",
-            "params": ["zcash-cpu-miner/0.1.0", null, null, null]
+            "params": ["zcash-cpu-miner/0.2.0", null, null, null]
         })
         .to_string(),
     )?;
@@ -180,20 +209,37 @@ fn main() -> anyhow::Result<()> {
                 is_mining.store(true, Ordering::SeqCst);
 
                 let threads = num_threads;
+
+                #[cfg(feature = "native")]
                 std::thread::spawn(move || {
-                    mine_job(
+                    mine_job(MineJobParams {
                         header,
                         nonce_1,
                         nonce_2_size,
-                        gen,
+                        generation: gen,
                         gen_check,
                         writer,
                         job_id,
                         time_hex,
-                        worker,
+                        worker_name: worker,
                         target,
-                        threads,
-                    );
+                        num_threads: threads,
+                    });
+                });
+
+                #[cfg(not(feature = "native"))]
+                mine_job(MineJobParams {
+                    header,
+                    nonce_1,
+                    nonce_2_size,
+                    generation: gen,
+                    gen_check,
+                    writer,
+                    job_id,
+                    time_hex,
+                    worker_name: worker,
+                    target,
+                    num_threads: threads,
                 });
             }
             "client.reconnect" => {
@@ -202,193 +248,4 @@ fn main() -> anyhow::Result<()> {
             _ => {}
         }
     }
-}
-
-fn mine_job(
-    header: Vec<u8>,
-    nonce_1: Vec<u8>,
-    nonce_2_size: usize,
-    generation: u64,
-    gen_check: Arc<AtomicU64>,
-    writer: Arc<Mutex<TcpStream>>,
-    job_id: String,
-    time_hex: String,
-    worker_name: String,
-    target: Arc<Mutex<[u8; 32]>>,
-    num_threads: u64,
-) {
-    let start = Instant::now();
-    let nonces_tried = Arc::new(AtomicU64::new(0));
-    let solutions_total = Arc::new(AtomicU64::new(0));
-    let shares_submitted = Arc::new(AtomicU64::new(0));
-
-    let mut handles = Vec::new();
-
-    for thread_id in 0..num_threads {
-        let header = header.clone();
-        let nonce_1 = nonce_1.clone();
-        let gen_check = gen_check.clone();
-        let writer = writer.clone();
-        let job_id = job_id.clone();
-        let time_hex = time_hex.clone();
-        let worker_name = worker_name.clone();
-        let nonces_tried = nonces_tried.clone();
-        let solutions_total = solutions_total.clone();
-        let shares_submitted = shares_submitted.clone();
-        let target = target.clone();
-
-        handles.push(std::thread::spawn(move || {
-            let mut counter = thread_id;
-            loop {
-                if gen_check.load(Ordering::Relaxed) != generation {
-                    return;
-                }
-
-                let mut nonce = [0u8; 32];
-                nonce[..nonce_1.len()].copy_from_slice(&nonce_1);
-                let cb = counter.to_le_bytes();
-                for i in 0..std::cmp::min(nonce_2_size, 8) {
-                    nonce[nonce_1.len() + i] = cb[i];
-                }
-
-                let mut used = false;
-                let nonce_copy = nonce;
-                let solutions = equihash::tromp::solve_200_9(&header, || {
-                    if used {
-                        return None;
-                    }
-                    used = true;
-                    Some(nonce_copy)
-                });
-
-                let n = nonces_tried.fetch_add(1, Ordering::Relaxed) + 1;
-                solutions_total.fetch_add(solutions.len() as u64, Ordering::Relaxed);
-
-                if thread_id == 0 {
-                    let elapsed = start.elapsed().as_secs_f64();
-                    let rate = if elapsed > 0.0 { n as f64 / elapsed } else { 0.0 };
-                    let sols = solutions_total.load(Ordering::Relaxed);
-                    let shares = shares_submitted.load(Ordering::Relaxed);
-                    eprint!(
-                        "\r    [job {}] nonces: {} ({:.2}/s) | sols: {} | shares: {} | {:.0}s    ",
-                        job_id, n, rate, sols, shares, elapsed
-                    );
-                }
-
-                let current_target = *target.lock().unwrap();
-
-                for solution in &solutions {
-                    let mut full_header = header.clone();
-                    full_header.extend_from_slice(&nonce);
-                    let mut solution_with_prefix = compact_size(solution.len());
-                    solution_with_prefix.extend_from_slice(solution);
-                    full_header.extend_from_slice(&solution_with_prefix);
-
-                    let first = Sha256::digest(&full_header);
-                    let second = Sha256::digest(first);
-                    let hash_bytes: [u8; 32] = second.into();
-
-                    if meets_target(&hash_bytes, &current_target) {
-                        shares_submitted.fetch_add(1, Ordering::Relaxed);
-                        let nonce_2_hex = hex::encode(&nonce[nonce_1.len()..]);
-                        let solution_hex = hex::encode(solution);
-
-                        eprintln!(
-                            "\n    SHARE FOUND! hash={}...",
-                            &hex::encode(
-                                hash_bytes
-                                    .iter()
-                                    .rev()
-                                    .take(4)
-                                    .copied()
-                                    .collect::<Vec<u8>>()
-                            )
-                        );
-
-                        let msg = serde_json::json!({
-                            "id": 4,
-                            "method": "mining.submit",
-                            "params": [worker_name, job_id, time_hex, nonce_2_hex, solution_hex]
-                        })
-                        .to_string();
-
-                        if let Err(e) = send_line(&writer, &msg) {
-                            eprintln!("    Submit failed: {}", e);
-                        }
-                    }
-                }
-
-                counter += num_threads;
-            }
-        }));
-    }
-
-    for h in handles {
-        let _ = h.join();
-    }
-
-    let n = nonces_tried.load(Ordering::Relaxed);
-    let sols = solutions_total.load(Ordering::Relaxed);
-    let shares = shares_submitted.load(Ordering::Relaxed);
-    let elapsed = start.elapsed().as_secs_f64();
-    eprintln!(
-        "\n    Job {} done: {} nonces, {} sols, {} shares ({:.1}s)",
-        job_id, n, sols, shares, elapsed
-    );
-}
-
-fn meets_target(hash: &[u8; 32], target: &[u8; 32]) -> bool {
-    for i in 0..32 {
-        let h = hash[31 - i];
-        if h < target[i] {
-            return true;
-        } else if h > target[i] {
-            return false;
-        }
-    }
-    true
-}
-
-fn compact_size(n: usize) -> Vec<u8> {
-    let n = n as u64;
-    if n < 253 {
-        vec![n as u8]
-    } else if n <= 0xFFFF {
-        let mut v = vec![0xFD];
-        v.extend_from_slice(&(n as u16).to_le_bytes());
-        v
-    } else {
-        let mut v = vec![0xFE];
-        v.extend_from_slice(&(n as u32).to_le_bytes());
-        v
-    }
-}
-
-fn parse_target(hex_str: &str) -> anyhow::Result<[u8; 32]> {
-    let bytes = hex::decode(hex_str)?;
-    if bytes.len() > 32 {
-        anyhow::bail!("Target too long");
-    }
-    let mut arr = [0u8; 32];
-    let offset = 32 - bytes.len();
-    arr[offset..].copy_from_slice(&bytes);
-    Ok(arr)
-}
-
-fn send_line(writer: &Arc<Mutex<TcpStream>>, msg: &str) -> anyhow::Result<()> {
-    let mut w = writer
-        .lock()
-        .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-    writeln!(w, "{}", msg)?;
-    w.flush()?;
-    Ok(())
-}
-
-fn read_json(reader: &mut BufReader<TcpStream>) -> anyhow::Result<serde_json::Value> {
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    if line.is_empty() {
-        anyhow::bail!("Connection closed by pool");
-    }
-    Ok(serde_json::from_str(line.trim())?)
 }

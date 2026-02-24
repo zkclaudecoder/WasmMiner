@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WasmMiner Dashboard</title>
+    <link data-trunk rel="rust" data-wasm-opt="z" />
+    <style>
+        :root {
+            --bg: #0d1117;
+            --surface: #161b22;
+            --border: #30363d;
+            --text: #e6edf3;
+            --text-muted: #8b949e;
+            --accent: #58a6ff;
+            --green: #3fb950;
+            --red: #f85149;
+            --yellow: #d29922;
+            --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: var(--font-mono);
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 1rem;
+        }
+        h1 {
+            font-size: 1.4rem;
+            margin-bottom: 1rem;
+            color: var(--accent);
+        }
+        .dashboard {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+        .panel {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+        }
+        .panel h2 {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            margin-bottom: 0.75rem;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 0.5rem;
+        }
+        .panel.full-width {
+            grid-column: 1 / -1;
+        }
+        label {
+            display: block;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-bottom: 0.25rem;
+            margin-top: 0.5rem;
+        }
+        input[type="text"] {
+            width: 100%;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 0.4rem 0.6rem;
+            border-radius: 4px;
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+        }
+        input[type="text"]:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        button {
+            margin-top: 0.75rem;
+            padding: 0.5rem 1.5rem;
+            border: none;
+            border-radius: 4px;
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button.start {
+            background: var(--green);
+            color: var(--bg);
+        }
+        button.stop {
+            background: var(--red);
+            color: var(--bg);
+        }
+        button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.3rem 0;
+            font-size: 0.85rem;
+        }
+        .stat-label { color: var(--text-muted); }
+        .stat-value { color: var(--text); font-weight: bold; }
+        .stat-value.green { color: var(--green); }
+        .stat-value.red { color: var(--red); }
+        .stat-value.yellow { color: var(--yellow); }
+        .stat-value.accent { color: var(--accent); }
+        .log-panel {
+            max-height: 250px;
+            overflow-y: auto;
+            font-size: 0.75rem;
+            line-height: 1.5;
+        }
+        .log-panel div {
+            padding: 0.1rem 0;
+            border-bottom: 1px solid var(--border);
+        }
+        .log-panel .log-time { color: var(--text-muted); margin-right: 0.5rem; }
+        .log-panel .log-info { color: var(--accent); }
+        .log-panel .log-success { color: var(--green); }
+        .log-panel .log-error { color: var(--red); }
+        .log-panel .log-warn { color: var(--yellow); }
+        .status-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 0.4rem;
+        }
+        .status-dot.connected { background: var(--green); }
+        .status-dot.disconnected { background: var(--red); }
+        .status-dot.mining { background: var(--green); animation: pulse 1s infinite; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+    </style>
+</head>
+<body>
+    <noscript>This app requires JavaScript.</noscript>
+</body>
+</html>
