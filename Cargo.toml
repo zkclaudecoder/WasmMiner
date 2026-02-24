@@ -1,0 +1,17 @@
+[package]
+name = "zcash-cpu-miner"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[[bin]]
+name = "zcash-cpu-miner"
+path = "src/main.rs"
+
+[dependencies]
+equihash = { version = "0.2", features = ["solver"] }
+blake2b_simd = "1"
+sha2 = "0.10"
+serde_json = "1"
+hex = "0.4"
+anyhow = "1"
