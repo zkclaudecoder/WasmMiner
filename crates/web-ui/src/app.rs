@@ -53,6 +53,11 @@ pub struct MiningState {
 
 impl MiningState {
     pub fn new() -> Self {
+        let rand_id = (js_sys::Math::random() * 90000.0) as u32 + 10000;
+        let default_worker = format!(
+            "tmRhAwek1qaG3bqy4W8nih9NQsycYrLuV4n.wasmbrowser{}",
+            rand_id
+        );
         Self {
             connected: RwSignal::new(false),
             authorized: RwSignal::new(false),
@@ -66,9 +71,9 @@ impl MiningState {
             hashrate: RwSignal::new(0.0),
             is_mining: RwSignal::new(false),
             log_messages: RwSignal::new(Vec::new()),
-            proxy_url: RwSignal::new("ws://127.0.0.1:9144".to_string()),
-            pool_addr: RwSignal::new(String::new()),
-            worker_name: RwSignal::new(String::new()),
+            proxy_url: RwSignal::new("ws://74.80.181.116:9144".to_string()),
+            pool_addr: RwSignal::new("74.80.181.116:3333".to_string()),
+            worker_name: RwSignal::new(default_worker),
         }
     }
 
