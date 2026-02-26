@@ -71,8 +71,8 @@ impl MiningState {
             hashrate: RwSignal::new(0.0),
             is_mining: RwSignal::new(false),
             log_messages: RwSignal::new(Vec::new()),
-            proxy_url: RwSignal::new("ws://74.80.181.116:9144".to_string()),
-            pool_addr: RwSignal::new("74.80.181.116:3333".to_string()),
+            proxy_url: RwSignal::new("ws://pool.tazminer.com:9144".to_string()),
+            pool_addr: RwSignal::new("pool.tazminer.com:3333".to_string()),
             worker_name: RwSignal::new(default_worker),
         }
     }

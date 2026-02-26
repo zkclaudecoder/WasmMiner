@@ -34,32 +34,22 @@ pub fn ConfigPanel() -> impl IntoView {
         <div class="panel">
             <h2>"Configuration"</h2>
 
-            <label>"Proxy URL"</label>
-            <input type="text"
-                prop:value=move || state.proxy_url.get()
-                on:input=move |ev| {
-                    state.proxy_url.set(event_target_value(&ev));
-                }
-                disabled=move || is_mining.get()
-            />
+            <div class="stat-row">
+                <span class="stat-label">"Pool"</span>
+                <span class="stat-value accent">{move || state.pool_addr.get()}</span>
+            </div>
 
-            <label>"Pool Address (host:port)"</label>
-            <input type="text"
-                prop:value=move || state.pool_addr.get()
-                on:input=move |ev| {
-                    state.pool_addr.set(event_target_value(&ev));
-                }
-                placeholder="pool.example.com:3333"
-                disabled=move || is_mining.get()
-            />
-
-            <label>"Worker Name"</label>
+            <label>"Worker Address"</label>
+            <div style="font-size: 0.7rem; color: var(--text-muted); margin-bottom: 0.35rem;">
+                "Your Zcash address followed by a dot and any worker name, e.g. "
+                <span style="color: var(--accent);">"t1abc...xyz.myworker"</span>
+            </div>
             <input type="text"
                 prop:value=move || state.worker_name.get()
                 on:input=move |ev| {
                     state.worker_name.set(event_target_value(&ev));
                 }
-                placeholder="t1YourAddress.worker1"
+                placeholder="t1YourZcashAddress.workerName"
                 disabled=move || is_mining.get()
             />
 
