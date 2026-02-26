@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use leptos::prelude::*;
+use wasm_bindgen::prelude::*;
 
 use wasmminer_core::stratum_utils::parse_target;
 use wasmminer_core::types::{JobParams, SolveResult};
@@ -13,6 +14,11 @@ use crate::services::worker::MinerWorker;
 const DEFAULT_TARGET: &str =
     "2000000000000000000000000000000000000000000000000000000000000000";
 
+/// Max reconnect window in seconds (5 minutes).
+const RECONNECT_WINDOW_SECS: f64 = 300.0;
+/// Delay between reconnect attempts in milliseconds.
+const RECONNECT_DELAY_MS: u32 = 3000;
+
 // Thread-local storage for the active mining session
 thread_local! {
     static ACTIVE_SESSION: RefCell<Option<MiningSession>> = const { RefCell::new(None) };
@@ -21,6 +27,8 @@ thread_local! {
 struct MiningSession {
     ws: WsConnection,
     worker: MinerWorker,
+    /// Whether the user explicitly requested stop (vs disconnect).
+    user_stopped: Rc<RefCell<bool>>,
 }
 
 pub fn start_mining(state: MiningState) {
@@ -33,7 +41,18 @@ pub fn start_mining(state: MiningState) {
     let proxy_url = state.proxy_url.get_untracked();
     let pool_addr = state.pool_addr.get_untracked();
     let worker_name = state.worker_name.get_untracked();
+    let reconnect_start = Rc::new(RefCell::new(0.0_f64)); // set on first disconnect
 
+    connect_session(state, proxy_url, pool_addr, worker_name, reconnect_start);
+}
+
+fn connect_session(
+    state: MiningState,
+    proxy_url: String,
+    pool_addr: String,
+    worker_name: String,
+    reconnect_start: Rc<RefCell<f64>>,
+) {
     // Create WebSocket connection
     let ws = match WsConnection::new(&proxy_url) {
         Ok(ws) => ws,
@@ -54,6 +73,8 @@ pub fn start_mining(state: MiningState) {
             return;
         }
     };
+
+    let user_stopped = Rc::new(RefCell::new(false));
 
     // Shared state for callbacks
     let nonce_1_hex: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
@@ -154,8 +175,12 @@ pub fn start_mining(state: MiningState) {
     {
         let pool_addr = pool_addr.clone();
         let state = state;
+        let reconnect_start = reconnect_start.clone();
 
         ws.set_onopen(move || {
+            // Reset reconnect timer on successful connection
+            *reconnect_start.borrow_mut() = 0.0;
+
             state.log(LogLevel::Info, "WebSocket connected, sending pool address...");
             ACTIVE_SESSION.with(|session| {
                 if let Some(s) = session.borrow().as_ref() {
@@ -176,11 +201,73 @@ pub fn start_mining(state: MiningState) {
 
     {
         let state = state;
+        let user_stopped = user_stopped.clone();
+        let proxy_url = proxy_url.clone();
+        let pool_addr = pool_addr.clone();
+        let worker_name = worker_name.clone();
+        let reconnect_start = reconnect_start.clone();
 
         ws.set_onclose(move |_ev: web_sys::CloseEvent| {
-            state.log(LogLevel::Warn, "WebSocket closed");
             state.connected.set(false);
-            state.is_mining.set(false);
+
+            // If user pressed stop, don't reconnect
+            if *user_stopped.borrow() {
+                return;
+            }
+
+            // Terminate the current worker (it can't do anything without WS)
+            ACTIVE_SESSION.with(|session| {
+                if let Some(s) = session.borrow_mut().take() {
+                    s.worker.stop();
+                    s.worker.terminate();
+                }
+            });
+
+            let now = js_sys::Date::now() / 1000.0;
+            let mut start = reconnect_start.borrow_mut();
+            if *start == 0.0 {
+                *start = now;
+            }
+            let elapsed = now - *start;
+
+            if elapsed >= RECONNECT_WINDOW_SECS {
+                state.log(LogLevel::Error, "Reconnect timeout (5 min). Stopping miner.");
+                state.is_mining.set(false);
+                state.authorized.set(false);
+                return;
+            }
+
+            let remaining = (RECONNECT_WINDOW_SECS - elapsed).ceil() as u32;
+            state.log(
+                LogLevel::Warn,
+                format!("Disconnected. Reconnecting in {}s ({} s remaining)...", RECONNECT_DELAY_MS / 1000, remaining),
+            );
+
+            // Schedule reconnect
+            let proxy_url = proxy_url.clone();
+            let pool_addr = pool_addr.clone();
+            let worker_name = worker_name.clone();
+            let reconnect_start = reconnect_start.clone();
+            let cb = Closure::once(move || {
+                // Check if user stopped while waiting
+                let stopped = ACTIVE_SESSION.with(|session| {
+                    session.borrow().as_ref().map_or(true, |s| *s.user_stopped.borrow())
+                });
+                // No active session means user stopped or we already cleaned up
+                if stopped && !state.is_mining.get_untracked() {
+                    return;
+                }
+                state.log(LogLevel::Info, "Attempting reconnect...");
+                connect_session(state, proxy_url, pool_addr, worker_name, reconnect_start);
+            });
+            web_sys::window()
+                .unwrap()
+                .set_timeout_with_callback_and_timeout_and_arguments_0(
+                    cb.as_ref().unchecked_ref(),
+                    RECONNECT_DELAY_MS as i32,
+                )
+                .unwrap();
+            cb.forget();
         });
     }
 
@@ -403,13 +490,15 @@ pub fn start_mining(state: MiningState) {
 
     // Store the session
     ACTIVE_SESSION.with(|session| {
-        *session.borrow_mut() = Some(MiningSession { ws, worker });
+        *session.borrow_mut() = Some(MiningSession { ws, worker, user_stopped });
     });
 }
 
 pub fn stop_mining(state: MiningState) {
     ACTIVE_SESSION.with(|session| {
         if let Some(s) = session.borrow_mut().take() {
+            // Signal user-initiated stop so onclose doesn't reconnect
+            *s.user_stopped.borrow_mut() = true;
             s.worker.stop();
             s.worker.terminate();
             s.ws.close();
