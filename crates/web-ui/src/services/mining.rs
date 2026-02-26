@@ -40,7 +40,7 @@ pub fn start_mining(state: MiningState) {
 
     let proxy_url = state.proxy_url.get_untracked();
     let pool_addr = state.pool_addr.get_untracked();
-    let worker_name = state.worker_name.get_untracked();
+    let worker_name = state.worker_name();
     let reconnect_start = Rc::new(RefCell::new(0.0_f64)); // set on first disconnect
 
     connect_session(state, proxy_url, pool_addr, worker_name, reconnect_start);

@@ -48,16 +48,13 @@ pub struct MiningState {
     // Config (stored so services can read)
     pub proxy_url: RwSignal<String>,
     pub pool_addr: RwSignal<String>,
-    pub worker_name: RwSignal<String>,
+    pub zcash_address: RwSignal<String>,
+    pub worker_label: RwSignal<String>,
 }
 
 impl MiningState {
     pub fn new() -> Self {
         let rand_id = (js_sys::Math::random() * 90000.0) as u32 + 10000;
-        let default_worker = format!(
-            "tmRhAwek1qaG3bqy4W8nih9NQsycYrLuV4n.wasmbrowser{}",
-            rand_id
-        );
         Self {
             connected: RwSignal::new(false),
             authorized: RwSignal::new(false),
@@ -73,7 +70,19 @@ impl MiningState {
             log_messages: RwSignal::new(Vec::new()),
             proxy_url: RwSignal::new("ws://pool.tazminer.com:9144".to_string()),
             pool_addr: RwSignal::new("pool.tazminer.com:3333".to_string()),
-            worker_name: RwSignal::new(default_worker),
+            zcash_address: RwSignal::new("tmRhAwek1qaG3bqy4W8nih9NQsycYrLuV4n".to_string()),
+            worker_label: RwSignal::new(format!("wasmbrowser{}", rand_id)),
+        }
+    }
+
+    /// Returns "address.worker" combined string for stratum protocol.
+    pub fn worker_name(&self) -> String {
+        let addr = self.zcash_address.get_untracked();
+        let label = self.worker_label.get_untracked();
+        if label.is_empty() {
+            addr
+        } else {
+            format!("{}.{}", addr, label)
         }
     }
 

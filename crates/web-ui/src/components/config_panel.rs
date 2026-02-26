@@ -9,16 +9,16 @@ pub fn ConfigPanel() -> impl IntoView {
     let state = expect_context::<MiningState>();
 
     let on_start = move |_| {
-        let proxy = state.proxy_url.get_untracked();
-        let pool = state.pool_addr.get_untracked();
-        let worker = state.worker_name.get_untracked();
+        let addr = state.zcash_address.get_untracked();
 
-        if pool.is_empty() || worker.is_empty() {
-            state.log(LogLevel::Error, "Pool address and worker name are required");
+        if addr.is_empty() {
+            state.log(LogLevel::Error, "Zcash address is required");
             return;
         }
 
-        state.log(LogLevel::Info, format!("Connecting to {} via {}", pool, proxy));
+        let worker = state.worker_name();
+        let pool = state.pool_addr.get_untracked();
+        state.log(LogLevel::Info, format!("Connecting to {} as {}", pool, worker));
         start_mining(state);
     };
 
@@ -39,17 +39,29 @@ pub fn ConfigPanel() -> impl IntoView {
                 <span class="stat-value accent">{move || state.pool_addr.get()}</span>
             </div>
 
-            <label>"Worker Address"</label>
+            <label>"Zcash Address"</label>
             <div style="font-size: 0.7rem; color: var(--text-muted); margin-bottom: 0.35rem;">
-                "Your Zcash address followed by a dot and any worker name, e.g. "
-                <span style="color: var(--accent);">"t1abc...xyz.myworker"</span>
+                "Payouts are sent to this address"
             </div>
             <input type="text"
-                prop:value=move || state.worker_name.get()
+                prop:value=move || state.zcash_address.get()
                 on:input=move |ev| {
-                    state.worker_name.set(event_target_value(&ev));
+                    state.zcash_address.set(event_target_value(&ev));
                 }
-                placeholder="t1YourZcashAddress.workerName"
+                placeholder="t1YourZcashAddress"
+                disabled=move || is_mining.get()
+            />
+
+            <label>"Worker Name"</label>
+            <div style="font-size: 0.7rem; color: var(--text-muted); margin-bottom: 0.35rem;">
+                "A label to identify this miner (e.g. laptop, desktop)"
+            </div>
+            <input type="text"
+                prop:value=move || state.worker_label.get()
+                on:input=move |ev| {
+                    state.worker_label.set(event_target_value(&ev));
+                }
+                placeholder="myworker"
                 disabled=move || is_mining.get()
             />
 
