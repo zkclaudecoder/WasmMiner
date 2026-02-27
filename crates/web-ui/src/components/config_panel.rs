@@ -18,7 +18,8 @@ pub fn ConfigPanel() -> impl IntoView {
                 return Some("Unified address looks too short".to_string());
             }
             const BECH32: &[u8] = b"023456789acdefghjklmnpqrstuvwxyz";
-            let payload = if addr.starts_with("utest") { &addr[5..] } else { &addr[2..] };
+            // Skip HRP + "1" separator: "utest1" = 6 chars, "u1" = 2 chars
+            let payload = if addr.starts_with("utest") { &addr[6..] } else { &addr[2..] };
             if let Some(c) = payload.chars().find(|c| !BECH32.contains(&(*c as u8))) {
                 return Some(format!("Invalid character '{}' in unified address", c));
             }
