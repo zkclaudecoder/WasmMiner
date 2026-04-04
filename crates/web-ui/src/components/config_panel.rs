@@ -13,10 +13,14 @@ pub fn ConfigPanel() -> impl IntoView {
         if addr.is_empty() {
             return Some("Zcash address is required".to_string());
         }
-        // Reject mainnet addresses — this pool is testnet
-        if addr.starts_with("t1") || addr.starts_with("t3") || addr.starts_with("u1") {
-            return Some("This is a testnet pool — use a testnet address (tm… or utest…)".to_string());
+        // Reject mainnet addresses — this pool is testnet only
+        if addr.starts_with("t1") || addr.starts_with("t3")
+            || addr.starts_with("zs")
+            || (addr.starts_with('u') && !addr.starts_with("utest"))
+        {
+            return Some("This is a testnet pool — use a testnet address (tm…, utest…, or ztestsapling…)".to_string());
         }
+        // Testnet unified address (utest1…)
         if addr.starts_with("utest") {
             if addr.len() < 20 {
                 return Some("Unified address looks too short".to_string());
@@ -28,6 +32,7 @@ pub fn ConfigPanel() -> impl IntoView {
             }
             return None;
         }
+        // Testnet transparent address (tm… or t2…)
         if addr.starts_with("tm") || addr.starts_with("t2") {
             if addr.len() < 33 || addr.len() > 36 {
                 return Some(format!("Address length {} looks wrong (expected ~35)", addr.len()));
@@ -38,7 +43,19 @@ pub fn ConfigPanel() -> impl IntoView {
             }
             return None;
         }
-        Some("Address must start with tm, t2, or utest (testnet only)".to_string())
+        // Testnet sapling address (ztestsapling1…)
+        if addr.starts_with("ztestsapling") {
+            if addr.len() < 70 {
+                return Some("Sapling address looks too short".to_string());
+            }
+            const BECH32: &[u8] = b"023456789acdefghjklmnpqrstuvwxyz";
+            let payload = &addr[14..]; // skip "ztestsapling1"
+            if let Some(c) = payload.chars().find(|c| !BECH32.contains(&(*c as u8))) {
+                return Some(format!("Invalid character '{}' in sapling address", c));
+            }
+            return None;
+        }
+        Some("Address must start with tm, t2, utest, or ztestsapling (testnet only)".to_string())
     });
 
     let on_start = move |_| {
@@ -79,7 +96,7 @@ pub fn ConfigPanel() -> impl IntoView {
                 on:input=move |ev| {
                     state.zcash_address.set(event_target_value(&ev));
                 }
-                placeholder="tmYourTestnetAddress"
+                placeholder="tm… / utest… / ztestsapling…"
                 disabled=move || is_mining.get()
             />
             {move || addr_warning.get().map(|msg| view! {
