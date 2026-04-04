@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use leptos::prelude::*;
@@ -9,7 +10,7 @@ use wasmminer_core::types::{JobParams, SolveResult};
 
 use crate::app::{LogLevel, MiningState};
 use crate::services::websocket::WsConnection;
-use crate::services::worker::MinerWorker;
+use crate::services::worker_pool::WorkerPool;
 
 const DEFAULT_TARGET: &str =
     "2000000000000000000000000000000000000000000000000000000000000000";
@@ -26,7 +27,7 @@ thread_local! {
 
 struct MiningSession {
     ws: WsConnection,
-    worker: MinerWorker,
+    pool: WorkerPool,
     /// Whether the user explicitly requested stop (vs disconnect).
     user_stopped: Rc<RefCell<bool>>,
 }
@@ -37,13 +38,15 @@ pub fn start_mining(state: MiningState) {
 
     state.is_mining.set(true);
     state.reset_stats();
+    state.workers_ready.set(0);
 
     let proxy_url = state.proxy_url.get_untracked();
     let pool_addr = state.pool_addr.get_untracked();
     let worker_name = state.worker_name();
+    let thread_count = state.thread_count.get_untracked();
     let reconnect_start = Rc::new(RefCell::new(0.0_f64)); // set on first disconnect
 
-    connect_session(state, proxy_url, pool_addr, worker_name, reconnect_start);
+    connect_session(state, proxy_url, pool_addr, worker_name, thread_count, reconnect_start);
 }
 
 fn connect_session(
@@ -51,6 +54,7 @@ fn connect_session(
     proxy_url: String,
     pool_addr: String,
     worker_name: String,
+    thread_count: usize,
     reconnect_start: Rc<RefCell<f64>>,
 ) {
     // Create WebSocket connection
@@ -63,17 +67,18 @@ fn connect_session(
         }
     };
 
-    // Create Web Worker
-    let worker = match MinerWorker::new() {
-        Ok(w) => w,
+    // Create Worker Pool
+    let pool = match WorkerPool::new(thread_count) {
+        Ok(p) => p,
         Err(e) => {
-            state.log(LogLevel::Error, format!("Failed to create worker: {}", e));
+            state.log(LogLevel::Error, format!("Failed to create workers: {}", e));
             ws.close();
             state.is_mining.set(false);
             return;
         }
     };
 
+    let total_workers = pool.count();
     let user_stopped = Rc::new(RefCell::new(false));
 
     // Shared state for callbacks
@@ -83,24 +88,37 @@ fn connect_session(
     ));
     let current_job_json: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let mining_start_time: Rc<RefCell<f64>> = Rc::new(RefCell::new(0.0));
+    let nonce_timestamps: Rc<RefCell<VecDeque<f64>>> = Rc::new(RefCell::new(VecDeque::new()));
     let submit_id: Rc<RefCell<u64>> = Rc::new(RefCell::new(10));
 
-    // --- Worker message handler ---
+    // --- Worker message handler (shared across all workers) ---
     {
         let state = state;
         let current_job_json = current_job_json.clone();
         let mining_start_time = mining_start_time.clone();
+        let nonce_timestamps = nonce_timestamps.clone();
 
-        worker.set_onmessage(move |ev: web_sys::MessageEvent| {
+        pool.set_on_message(move |ev: web_sys::MessageEvent| {
             let data = ev.data();
             let msg_type = js_sys::Reflect::get(&data, &"type".into())
                 .ok()
                 .and_then(|v| v.as_string())
                 .unwrap_or_default();
 
+            let worker_id = js_sys::Reflect::get(&data, &"workerId".into())
+                .ok()
+                .and_then(|v| v.as_f64())
+                .map(|v| v as usize);
+
             match msg_type.as_str() {
                 "ready" => {
-                    state.log(LogLevel::Success, "Solver initialized (~144MB allocated)");
+                    state.workers_ready.update(|n| *n += 1);
+                    let ready = state.workers_ready.get_untracked();
+                    let id = worker_id.unwrap_or(0);
+                    state.log(
+                        LogLevel::Success,
+                        format!("Worker {} ready (~144MB) ({}/{})", id, ready, total_workers),
+                    );
                 }
                 "result" => {
                     let result_json = js_sys::Reflect::get(&data, &"result".into())
@@ -121,12 +139,23 @@ fn connect_session(
                             state.hashrate.set(nonces as f64 / elapsed);
                         }
 
+                        // Update 1-minute rolling hashrate
+                        {
+                            let mut ts = nonce_timestamps.borrow_mut();
+                            ts.push_back(now);
+                            while ts.front().map_or(false, |&t| t < now - 60.0) {
+                                ts.pop_front();
+                            }
+                            state.hashrate_1m.set(ts.len() as f64 / 60.0);
+                        }
+
                         // Submit shares via WebSocket
                         for share in &result.shares {
                             state.shares_submitted.update(|n| *n += 1);
+                            let wid = worker_id.unwrap_or(0);
                             state.log(
                                 LogLevel::Success,
-                                format!("SHARE FOUND! hash={}...", share.hash_preview),
+                                format!("SHARE FOUND (worker {})! hash={}...", wid, share.hash_preview),
                             );
 
                             // Get current job JSON to extract job_id, time_hex, worker_name
@@ -164,7 +193,8 @@ fn connect_session(
                         .ok()
                         .and_then(|v| v.as_string())
                         .unwrap_or("Unknown worker error".to_string());
-                    state.log(LogLevel::Error, format!("Worker error: {}", message));
+                    let wid = worker_id.unwrap_or(0);
+                    state.log(LogLevel::Error, format!("Worker {} error: {}", wid, message));
                 }
                 _ => {}
             }
@@ -215,11 +245,11 @@ fn connect_session(
                 return;
             }
 
-            // Terminate the current worker (it can't do anything without WS)
+            // Terminate the current workers (they can't do anything without WS)
             ACTIVE_SESSION.with(|session| {
                 if let Some(s) = session.borrow_mut().take() {
-                    s.worker.stop();
-                    s.worker.terminate();
+                    s.pool.stop_all();
+                    s.pool.terminate_all();
                 }
             });
 
@@ -258,7 +288,8 @@ fn connect_session(
                     return;
                 }
                 state.log(LogLevel::Info, "Attempting reconnect...");
-                connect_session(state, proxy_url, pool_addr, worker_name, reconnect_start);
+                state.workers_ready.set(0);
+                connect_session(state, proxy_url, pool_addr, worker_name, thread_count, reconnect_start);
             });
             web_sys::window()
                 .unwrap()
@@ -354,10 +385,10 @@ fn connect_session(
                                     state.authorized.set(true);
                                     state.log(LogLevel::Success, "Worker authorized!");
 
-                                    // Initialize the solver worker
+                                    // Initialize all solver workers
                                     ACTIVE_SESSION.with(|session| {
                                         if let Some(s) = session.borrow().as_ref() {
-                                            s.worker.init();
+                                            s.pool.init_all();
                                         }
                                     });
                                 } else {
@@ -473,10 +504,10 @@ fn connect_session(
                     let job_json = serde_json::to_string(&job).unwrap();
                     *current_job_json.borrow_mut() = Some(job_json.clone());
 
-                    // Send job to worker
+                    // Send job to all workers with strided counters
                     ACTIVE_SESSION.with(|session| {
                         if let Some(s) = session.borrow().as_ref() {
-                            s.worker.new_job(&job_json, 0);
+                            s.pool.new_job_all(&job_json, 0);
                         }
                     });
                 }
@@ -490,7 +521,7 @@ fn connect_session(
 
     // Store the session
     ACTIVE_SESSION.with(|session| {
-        *session.borrow_mut() = Some(MiningSession { ws, worker, user_stopped });
+        *session.borrow_mut() = Some(MiningSession { ws, pool, user_stopped });
     });
 }
 
@@ -499,12 +530,13 @@ pub fn stop_mining(state: MiningState) {
         if let Some(s) = session.borrow_mut().take() {
             // Signal user-initiated stop so onclose doesn't reconnect
             *s.user_stopped.borrow_mut() = true;
-            s.worker.stop();
-            s.worker.terminate();
+            s.pool.stop_all();
+            s.pool.terminate_all();
             s.ws.close();
         }
     });
     state.is_mining.set(false);
     state.connected.set(false);
     state.authorized.set(false);
+    state.workers_ready.set(0);
 }

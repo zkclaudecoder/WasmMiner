@@ -104,6 +104,12 @@ impl HtLayout {
     }
 }
 
+/// Extract a byte from a u32 word in little-endian order using shift-mask.
+#[inline(always)]
+fn byte_from_word(word: u32, byte_idx: usize) -> u8 {
+    (word >> (8 * (byte_idx & 3))) as u8
+}
+
 /// Access a byte within a hash word array using the C union layout.
 /// On little-endian: bytes[n] within contiguous u32 words maps to
 /// word n/4, byte position n%4 in little-endian order.
@@ -111,7 +117,7 @@ impl HtLayout {
 fn hash_byte_at(table: &[u32], slot_base: usize, hash_start: usize, byte_idx: u32) -> u8 {
     let b = byte_idx as usize;
     let word = table[slot_base + hash_start + b / 4];
-    word.to_le_bytes()[b % 4]
+    byte_from_word(word, b)
 }
 
 /// Extract xhash (rest bits) from a slot0 hash (for odd rounds and digitK).
@@ -221,17 +227,16 @@ impl Solver {
         self.nsols = 0;
         self.sols.clear();
 
-        // Run algorithm
+        // Run algorithm — unrolled for constant-folding of HtLayout::new(r)
         self.digit0(&state);
-
-        for r in 1..WK {
-            if r & 1 != 0 {
-                self.digit_odd(r);
-            } else {
-                self.digit_even(r);
-            }
-        }
-
+        self.digit_odd(1);
+        self.digit_even(2);
+        self.digit_odd(3);
+        self.digit_even(4);
+        self.digit_odd(5);
+        self.digit_even(6);
+        self.digit_odd(7);
+        self.digit_even(8);
         self.digit_k();
 
         let mut results = Vec::new();
@@ -262,7 +267,7 @@ impl Solver {
     fn digit0(&mut self, state: &Blake2bState) {
         let hashbytes = hashsize(0);
         let nexthashunits = hashwords(hashbytes);
-        let nextbo = nexthashunits * 4 - hashbytes;
+        let _nextbo = nexthashunits * 4 - hashbytes; // always 0 for round 0
 
         for block in 0..NBLOCKS {
             let mut bstate = state.clone();
@@ -291,20 +296,16 @@ impl Solver {
                 // Copy hashbytes from ph[WN/8 - hashbytes..WN/8] into hash words
                 let src_offset = (WN / 8 - hashbytes) as usize;
                 let src = &ph[src_offset..(src_offset + hashbytes as usize)];
-                let dst_byte_offset = nextbo as usize;
 
-                // Clear hash words first
+                // Word-aligned copy: nextbo=0 for round 0, hashbytes=24 = 6 words exactly
                 for w in 0..nexthashunits as usize {
-                    self.table0[hash_start_word + w] = 0;
-                }
-
-                for (bi, &byte_val) in src.iter().enumerate() {
-                    let b = dst_byte_offset + bi;
-                    let word_idx = hash_start_word + b / 4;
-                    let byte_in_word = b % 4;
-                    let mut le = self.table0[word_idx].to_le_bytes();
-                    le[byte_in_word] = byte_val;
-                    self.table0[word_idx] = u32::from_le_bytes(le);
+                    let si = w * 4;
+                    self.table0[hash_start_word + w] = u32::from_le_bytes([
+                        src[si],
+                        src[si + 1],
+                        src[si + 2],
+                        src[si + 3],
+                    ]);
                 }
             }
         }
@@ -321,6 +322,10 @@ impl Solver {
         let write_tree_pos = (r / 2) as usize;
         let write_hash_start = (r / 2 + 1) as usize;
 
+        let prevhashunits = htl.prevhashunits as usize;
+        let dunits = htl.dunits as usize;
+        let prevbo = htl.prevbo as usize;
+
         for bucketid in 0..NBUCKETS {
             cd.clear();
             let bsize = self.getnslots(r - 1, bucketid);
@@ -333,25 +338,36 @@ impl Solver {
                     continue;
                 }
 
+                // Cache s1's hash words — invariant across the collision loop
+                let mut s1_hash = [0u32; 6];
+                for i in 0..prevhashunits {
+                    s1_hash[i] = self.table0[base1 + read_hash_start + i];
+                }
+
                 while cd.nextcollision() {
                     let s0 = cd.slot();
                     let base0 = slot_base(bucketid, s0 as usize);
-                    let base1 = slot_base(bucketid, s1 as usize);
 
-                    // Check last hash word for full collision
-                    let last_word = read_hash_start + htl.prevhashunits as usize - 1;
-                    if self.table0[base0 + last_word] == self.table0[base1 + last_word] {
+                    // Check last hash word for full collision (cached s1)
+                    if self.table0[base0 + read_hash_start + prevhashunits - 1]
+                        == s1_hash[prevhashunits - 1]
+                    {
                         continue;
                     }
 
-                    // XOR bucket ID: (((bytes0[prevbo+1]^bytes1[prevbo+1]) & 0xf) << 8)
-                    //                 | (bytes0[prevbo+2]^bytes1[prevbo+2])
+                    // XOR bucket ID using word-level XOR + byte extraction
                     let xorbucketid = {
-                        let b0_1 = hash_byte_at(&self.table0, base0, read_hash_start, htl.prevbo + 1);
-                        let b1_1 = hash_byte_at(&self.table0, base1, read_hash_start, htl.prevbo + 1);
-                        let b0_2 = hash_byte_at(&self.table0, base0, read_hash_start, htl.prevbo + 2);
-                        let b1_2 = hash_byte_at(&self.table0, base1, read_hash_start, htl.prevbo + 2);
-                        ((((b0_1 ^ b1_1) & 0xf) as u32) << 8) | ((b0_2 ^ b1_2) as u32)
+                        let w1 = (prevbo + 1) / 4;
+                        let xw = self.table0[base0 + read_hash_start + w1] ^ s1_hash[w1];
+                        let b1 = byte_from_word(xw, prevbo + 1);
+                        let w2 = (prevbo + 2) / 4;
+                        let b2 = if w2 == w1 {
+                            byte_from_word(xw, prevbo + 2)
+                        } else {
+                            let xw2 = self.table0[base0 + read_hash_start + w2] ^ s1_hash[w2];
+                            byte_from_word(xw2, prevbo + 2)
+                        };
+                        (((b1 & 0xf) as u32) << 8) | (b2 as u32)
                     };
 
                     let xorslot = self.getslot(r, xorbucketid as usize);
@@ -365,13 +381,10 @@ impl Solver {
                     self.table1[dst_base + write_tree_pos] =
                         tree_from_bid(bucketid as u32, s0, s1);
 
-                    // XOR hash words: for i in dunits..prevhashunits,
-                    //   dst_hash[i-dunits] = src0_hash[i] ^ src1_hash[i]
-                    for i in htl.dunits as usize..htl.prevhashunits as usize {
-                        let src_word = read_hash_start + i;
-                        let dst_word = write_hash_start + i - htl.dunits as usize;
-                        self.table1[dst_base + dst_word] =
-                            self.table0[base0 + src_word] ^ self.table0[base1 + src_word];
+                    // XOR hash words using cached s1 values
+                    for i in dunits..prevhashunits {
+                        self.table1[dst_base + write_hash_start + i - dunits] =
+                            self.table0[base0 + read_hash_start + i] ^ s1_hash[i];
                     }
                 }
             }
@@ -386,6 +399,9 @@ impl Solver {
         let read_hash_start = ((r - 1) / 2 + 1) as usize;
         let write_tree_pos = (r / 2) as usize;
         let write_hash_start = (r / 2 + 1) as usize;
+        let prevhashunits = htl.prevhashunits as usize;
+        let dunits = htl.dunits as usize;
+        let prevbo = htl.prevbo as usize;
 
         for bucketid in 0..NBUCKETS {
             cd.clear();
@@ -399,24 +415,36 @@ impl Solver {
                     continue;
                 }
 
+                // Cache s1's hash words — invariant across the collision loop
+                let mut s1_hash = [0u32; 6];
+                for i in 0..prevhashunits {
+                    s1_hash[i] = self.table1[base1 + read_hash_start + i];
+                }
+
                 while cd.nextcollision() {
                     let s0 = cd.slot();
                     let base0 = slot_base(bucketid, s0 as usize);
-                    let base1 = slot_base(bucketid, s1 as usize);
 
-                    let last_word = read_hash_start + htl.prevhashunits as usize - 1;
-                    if self.table1[base0 + last_word] == self.table1[base1 + last_word] {
+                    // Check last hash word for full collision (cached s1)
+                    if self.table1[base0 + read_hash_start + prevhashunits - 1]
+                        == s1_hash[prevhashunits - 1]
+                    {
                         continue;
                     }
 
-                    // Even round XOR bucket:
-                    // ((bytes0[prevbo+1]^bytes1[prevbo+1]) << 4) | ((bytes0[prevbo+2]^bytes1[prevbo+2]) >> 4)
+                    // Even round XOR bucket ID using word-level XOR + byte extraction
                     let xorbucketid = {
-                        let b0_1 = hash_byte_at(&self.table1, base0, read_hash_start, htl.prevbo + 1);
-                        let b1_1 = hash_byte_at(&self.table1, base1, read_hash_start, htl.prevbo + 1);
-                        let b0_2 = hash_byte_at(&self.table1, base0, read_hash_start, htl.prevbo + 2);
-                        let b1_2 = hash_byte_at(&self.table1, base1, read_hash_start, htl.prevbo + 2);
-                        (((b0_1 ^ b1_1) as u32) << 4) | (((b0_2 ^ b1_2) as u32) >> 4)
+                        let w1 = (prevbo + 1) / 4;
+                        let xw = self.table1[base0 + read_hash_start + w1] ^ s1_hash[w1];
+                        let b1 = byte_from_word(xw, prevbo + 1);
+                        let w2 = (prevbo + 2) / 4;
+                        let b2 = if w2 == w1 {
+                            byte_from_word(xw, prevbo + 2)
+                        } else {
+                            let xw2 = self.table1[base0 + read_hash_start + w2] ^ s1_hash[w2];
+                            byte_from_word(xw2, prevbo + 2)
+                        };
+                        ((b1 as u32) << 4) | ((b2 as u32) >> 4)
                     };
 
                     let xorslot = self.getslot(r, xorbucketid as usize);
@@ -429,11 +457,10 @@ impl Solver {
                     self.table0[dst_base + write_tree_pos] =
                         tree_from_bid(bucketid as u32, s0, s1);
 
-                    for i in htl.dunits as usize..htl.prevhashunits as usize {
-                        let src_word = read_hash_start + i;
-                        let dst_word = write_hash_start + i - htl.dunits as usize;
-                        self.table0[dst_base + dst_word] =
-                            self.table1[base0 + src_word] ^ self.table1[base1 + src_word];
+                    // XOR hash words using cached s1 values
+                    for i in dunits..prevhashunits {
+                        self.table0[dst_base + write_hash_start + i - dunits] =
+                            self.table1[base0 + read_hash_start + i] ^ s1_hash[i];
                     }
                 }
             }
@@ -447,6 +474,7 @@ impl Solver {
 
         // Reading from table0, round 8 data: hash at (8/2+1) = 5
         let read_hash_start = ((WK - 1) / 2 + 1) as usize;
+        let prevhashunits = htl.prevhashunits as usize;
 
         for bucketid in 0..NBUCKETS {
             cd.clear();
@@ -460,13 +488,14 @@ impl Solver {
                     continue;
                 }
 
+                // Cache s1's last hash word for the dup check
+                let s1_last = self.table0[base1 + read_hash_start + prevhashunits - 1];
+
                 while cd.nextcollision() {
                     let s0 = cd.slot();
                     let base0 = slot_base(bucketid, s0 as usize);
-                    let base1 = slot_base(bucketid, s1 as usize);
 
-                    let last_word = read_hash_start + htl.prevhashunits as usize - 1;
-                    if self.table0[base0 + last_word] == self.table0[base1 + last_word] {
+                    if self.table0[base0 + read_hash_start + prevhashunits - 1] == s1_last {
                         let tree = tree_from_bid(bucketid as u32, s0, s1);
                         self.candidate(tree);
                     }

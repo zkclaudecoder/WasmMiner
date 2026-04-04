@@ -38,6 +38,7 @@ pub struct MiningState {
     pub shares_accepted: RwSignal<u64>,
     pub shares_rejected: RwSignal<u64>,
     pub hashrate: RwSignal<f64>,
+    pub hashrate_1m: RwSignal<f64>,
 
     // Control
     pub is_mining: RwSignal<bool>,
@@ -50,11 +51,16 @@ pub struct MiningState {
     pub pool_addr: RwSignal<String>,
     pub zcash_address: RwSignal<String>,
     pub worker_label: RwSignal<String>,
+
+    // Multi-worker
+    pub thread_count: RwSignal<usize>,
+    pub workers_ready: RwSignal<usize>,
 }
 
 impl MiningState {
     pub fn new() -> Self {
         let rand_id = (js_sys::Math::random() * 90000.0) as u32 + 10000;
+
         Self {
             connected: RwSignal::new(false),
             authorized: RwSignal::new(false),
@@ -66,12 +72,15 @@ impl MiningState {
             shares_accepted: RwSignal::new(0),
             shares_rejected: RwSignal::new(0),
             hashrate: RwSignal::new(0.0),
+            hashrate_1m: RwSignal::new(0.0),
             is_mining: RwSignal::new(false),
             log_messages: RwSignal::new(Vec::new()),
             proxy_url: RwSignal::new("ws://pool.tazminer.com:9144".to_string()),
             pool_addr: RwSignal::new("pool.tazminer.com:3333".to_string()),
             zcash_address: RwSignal::new("tmRhAwek1qaG3bqy4W8nih9NQsycYrLuV4n".to_string()),
             worker_label: RwSignal::new(format!("wasmbrowser{}", rand_id)),
+            thread_count: RwSignal::new(1),
+            workers_ready: RwSignal::new(0),
         }
     }
 
@@ -114,6 +123,7 @@ impl MiningState {
         self.shares_accepted.set(0);
         self.shares_rejected.set(0);
         self.hashrate.set(0.0);
+        self.hashrate_1m.set(0.0);
         self.job_id.set(String::new());
         self.target_hex.set(String::new());
     }

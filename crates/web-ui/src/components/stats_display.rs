@@ -31,6 +31,13 @@ pub fn StatsDisplay() -> impl IntoView {
             </div>
 
             <div class="stat-row">
+                <span class="stat-label">"Hashrate (1m)"</span>
+                <span class="stat-value accent">
+                    {move || format!("{:.2} nonces/s", state.hashrate_1m.get())}
+                </span>
+            </div>
+
+            <div class="stat-row">
                 <span class="stat-label">"Nonces Tried"</span>
                 <span class="stat-value">{move || state.nonces_tried.get().to_string()}</span>
             </div>

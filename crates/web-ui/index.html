@@ -127,6 +127,32 @@
         .log-panel .log-success { color: var(--green); }
         .log-panel .log-error { color: var(--red); }
         .log-panel .log-warn { color: var(--yellow); }
+        .thread-btn {
+            width: 28px;
+            height: 28px;
+            margin-top: 0;
+            padding: 0;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--bg);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-family: var(--font-mono);
+            font-size: 1rem;
+            font-weight: bold;
+            cursor: pointer;
+            line-height: 1;
+        }
+        .thread-btn:hover:not(:disabled) {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+        .thread-btn:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
         .status-dot {
             display: inline-block;
             width: 8px;
