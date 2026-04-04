@@ -13,19 +13,22 @@ pub fn ConfigPanel() -> impl IntoView {
         if addr.is_empty() {
             return Some("Zcash address is required".to_string());
         }
-        if addr.starts_with("u1") || addr.starts_with("utest") {
+        // Reject mainnet addresses — this pool is testnet
+        if addr.starts_with("t1") || addr.starts_with("t3") || addr.starts_with("u1") {
+            return Some("This is a testnet pool — use a testnet address (tm… or utest…)".to_string());
+        }
+        if addr.starts_with("utest") {
             if addr.len() < 20 {
                 return Some("Unified address looks too short".to_string());
             }
             const BECH32: &[u8] = b"023456789acdefghjklmnpqrstuvwxyz";
-            // Skip HRP + "1" separator: "utest1" = 6 chars, "u1" = 2 chars
-            let payload = if addr.starts_with("utest") { &addr[6..] } else { &addr[2..] };
+            let payload = &addr[6..]; // skip "utest1"
             if let Some(c) = payload.chars().find(|c| !BECH32.contains(&(*c as u8))) {
                 return Some(format!("Invalid character '{}' in unified address", c));
             }
             return None;
         }
-        if addr.starts_with("t1") || addr.starts_with("t3") || addr.starts_with("tm") {
+        if addr.starts_with("tm") || addr.starts_with("t2") {
             if addr.len() < 33 || addr.len() > 36 {
                 return Some(format!("Address length {} looks wrong (expected ~35)", addr.len()));
             }
@@ -35,14 +38,12 @@ pub fn ConfigPanel() -> impl IntoView {
             }
             return None;
         }
-        Some("Address should start with t1, t3, tm, u1, or utest".to_string())
+        Some("Address must start with tm, t2, or utest (testnet only)".to_string())
     });
 
     let on_start = move |_| {
-        let addr = state.zcash_address.get_untracked();
-
-        if addr.is_empty() {
-            state.log(LogLevel::Error, "Zcash address is required");
+        if let Some(msg) = addr_warning.get_untracked() {
+            state.log(LogLevel::Error, msg);
             return;
         }
 
@@ -78,7 +79,7 @@ pub fn ConfigPanel() -> impl IntoView {
                 on:input=move |ev| {
                     state.zcash_address.set(event_target_value(&ev));
                 }
-                placeholder="t1YourZcashAddress"
+                placeholder="tmYourTestnetAddress"
                 disabled=move || is_mining.get()
             />
             {move || addr_warning.get().map(|msg| view! {
@@ -142,8 +143,9 @@ pub fn ConfigPanel() -> impl IntoView {
                         <button class="stop" on:click=on_stop>"Stop Mining"</button>
                     }.into_any()
                 } else {
+                    let has_warning = addr_warning.get().is_some();
                     view! {
-                        <button class="start" on:click=on_start>"Start Mining"</button>
+                        <button class="start" on:click=on_start disabled=has_warning>"Start Mining"</button>
                     }.into_any()
                 }
             }}
